@@ -732,9 +732,18 @@ async function handleRevisao(data) {
   const dataPedida = isoToBr(data_agendamento);
   const horaPedida = String(hora_agendamento || '').substring(0, 5);
 
-  // Grava EXATAMENTE o box + dia + hora escolhidos. Como o slot veio da
-  // disponibilidade REAL daquele box, o MapSis honra sem remarcar.
-  const erroSave = await tentarAgendar(boxId ? { id_box: boxId } : {}, observacaoFinal);
+  // Agenda SEM box. Nesta configuração do MapSis, agendar preso a um box
+  // específico é SEMPRE recusado ("sem horário disponível") — a grade de box é
+  // genérica (capacidade da loja), não agenda real por box. Sem box, o MapSis
+  // aceita e aloca a vaga (canal online = provisório, confirmado pela loja).
+  // O técnico escolhido entra como PREFERÊNCIA na observação.
+  // OBS: se o MapSis um dia habilitar agenda real por box para esta chave, basta
+  //      trocar `{}` por `{ id_box: boxId }` para honrar o box exato.
+  const temTecnico = boxId && info.tecnicoNome && info.tecnicoNome !== 'Sem preferência';
+  const obsAgendamento = temTecnico
+    ? [observacaoFinal, `Tecnico solicitado: ${info.tecnicoNome}`].filter(Boolean).join(' | ')
+    : observacaoFinal;
+  const erroSave = await tentarAgendar({}, obsAgendamento);
   if (erroSave) {
     return {
       screen: 'REVISAO',
@@ -746,25 +755,25 @@ async function handleRevisao(data) {
     };
   }
 
-  // Confirma com o que o MapSis REALMENTE gravou (get_agenda_veiculo) — garantia.
-  let dataReal = dataPedida, horaReal = horaPedida, mecanicoReal = info.tecnicoNome;
+  // Este MapSis (canal AGENDAMENTO ONLINE) trata o agendamento como PROVISÓRIO:
+  // registra o horário SOLICITADO pelo cliente e a concessionária confirma a
+  // disponibilidade real depois (nota "DATA/HORARIO PROVISORIO -> CONFIRMAR").
+  // Mostramos ao cliente o horário que ELE pediu + aviso de confirmação.
+  // (Logamos o que o MapSis pré-alocou só para diagnóstico.)
   try {
     const agV = await callMapsis('get_agenda_veiculo', { id_veiculo_mapsis });
     const raw = agV?.agendamentos || agV?.Agendamentos || [];
     const lista = (Array.isArray(raw) ? raw : [raw]).filter(Boolean);
     const idDe = a => Number(a?.id_mapsis_agendamento ?? a?.id_agendamento_mapsis ?? 0);
-    const recente = lista.sort((a, b) => idDe(b) - idDe(a))[0]; // maior id = recém-criado
+    const recente = lista.sort((a, b) => idDe(b) - idDe(a))[0];
     if (recente) {
-      dataReal = dataParaBr(recente.data) || dataReal;
-      horaReal = String(recente.horario || horaReal).substring(0, 5);
-      mecanicoReal = String(recente.consultor || '').trim() || mecanicoReal;
-      console.log(`[handleRevisao] marcado de fato: ${dataReal} ${horaReal} | box=${recente.box ?? '-'} | consultor=${mecanicoReal || '-'}`);
+      console.log(`[handleRevisao] solicitado ${dataPedida} ${horaPedida} | MapSis pre-alocou ${dataParaBr(recente.data)} ${recente.horario} box=${recente.box ?? '-'} (provisorio)`);
     }
   } catch (e) { console.warn('[handleRevisao] get_agenda_veiculo falhou:', e.message); }
 
-  const resumo_aviso = `${dataReal} ${horaReal}` !== `${dataPedida} ${horaPedida}`
-    ? `Atenção: o sistema ajustou para ${dataReal} às ${horaReal} (vaga mais próxima disponível).`
-    : '';
+  const tecnicoTxt = info.tecnicoNome && info.tecnicoNome !== 'Sem preferência'
+    ? `Técnico/Mecânico: ${info.tecnicoNome} (preferência)`
+    : 'Técnico/Mecânico: Sem preferência';
 
   return {
     screen: 'CONFIRMACAO',
@@ -772,13 +781,13 @@ async function handleRevisao(data) {
       tipo_cliente: data.tipo_cliente || '',
       resumo_loja: resumos.resumo_loja,
       resumo_servico: resumos.resumo_servico,
-      resumo_data: `Data e hora: ${dataReal} às ${horaReal}`,
-      resumo_tecnico: `Técnico/Mecânico: ${mecanicoReal || 'Definido pela oficina'}`,
+      resumo_data: `Data e hora solicitados: ${dataPedida} às ${horaPedida}`,
+      resumo_tecnico: tecnicoTxt,
       resumo_veiculo: resumos.resumo_veiculo,
       resumo_condutor: resumos.resumo_condutor,
       resumo_contato: resumos.resumo_contato,
       resumo_obs: resumos.resumo_obs,
-      resumo_aviso,
+      resumo_aviso: 'Seu pedido foi registrado! A concessionária vai confirmar a data e o horário disponíveis com você em breve.',
     },
   };
 }
