@@ -640,11 +640,11 @@ async function handleRevisao(data) {
       hora_agendamento,
       observacao: observacaoFinal,
       status_agendamento: 'P',
-      // Valores de mídia/origem precisam existir no MapSis (iguais ao PWA)
-      CalledFrom: 'WHATSAPP_FLOWS_NOVA_CHEVROLET',
-      origem: 'SITE',
-      origem_lead: 'INTERNET',
-      como_chegou: 'LANDING PAGE',
+      // Mídia/origem/aplicação do canal WhatsApp (valores cadastrados no MapSis)
+      CalledFrom: 'WHATSAPP',
+      origem: 'BLIP',
+      origem_lead: 'BLIP',
+      como_chegou: 'IA',
     });
   } catch (e) {
     saveResult = { retorno: { erro: 'Falha de comunicacao com o sistema.' } };
