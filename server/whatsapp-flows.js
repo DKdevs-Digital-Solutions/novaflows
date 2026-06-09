@@ -215,10 +215,11 @@ async function handleIdentificacao({ cpf_cnpj }) {
 
     console.log(`[handleIdentificacao] cliente encontrado → ${veiculos.length} veículo(s)`);
 
+    const nome = (cliente?.nome_cliente || cliente?.nome || 'Cliente').trim();
     return {
       screen: 'SELECAO_VEICULO',
       data: {
-        nome_cliente: cliente?.nome_cliente || cliente?.nome || 'Cliente',
+        saudacao: `Ola, ${nome}! Selecione o veiculo para agendar o servico.`,
         cpf_cnpj: doc,
         id_cliente_mapsis: String(cliente?.id_cliente_mapsis ?? clienteResult?.id_cliente_mapsis ?? ''),
         veiculos: veiculos.length ? veiculos : [{ id: '0', title: 'Nenhum veiculo cadastrado' }],
@@ -389,6 +390,7 @@ async function handleDataTecnico(data) {
     };
   }
 
+  const dataBr = isoToBr(data_agendamento);
   return {
     screen: 'SELECAO_HORARIO',
     data: {
@@ -396,7 +398,7 @@ async function handleDataTecnico(data) {
       id_servico_mapsis, id_loja_mapsis, cod_loja,
       id_box_mapsis: id_box_mapsis || '0',
       data_agendamento,
-      data_formatada: isoToBr(data_agendamento),
+      titulo_horario: `Horarios disponiveis para ${dataBr}:`,
       horarios,
     },
   };
@@ -409,19 +411,21 @@ async function handleSelecaoHorario(data) {
     id_box_mapsis, data_agendamento, hora_agendamento, observacao,
   } = data;
 
-  // Buscar contatos do cliente para exibir como sugestão na tela CONTATO
-  let email_atual = '', celular_atual = '', telefone_atual = '';
+  // Buscar contatos do cliente para exibir como dica na tela CONTATO.
+  // Os hints são pré-formatados no servidor porque WhatsApp Flows só avalia
+  // expressões quando o valor inteiro é "${data.campo}" — strings mistas não funcionam.
+  let email_hint = 'Ex: nome@email.com', celular_hint = 'Ex: 11999999999';
   try {
     const clienteResult = await callMapsis('get_cliente', { cpf_cnpj });
     const { cliente } = extractCliente(clienteResult);
     if (cliente) {
-      email_atual = cliente.email || '';
+      const email = (cliente.email || '').trim();
+      if (email) email_hint = `Atual: ${email}`;
+
       const dddCel = String(cliente.ddd_celular || '').trim();
       const cel    = String(cliente.celular     || '').trim();
-      celular_atual = dddCel && cel ? `${dddCel}${cel}` : (cel || '');
-      const ddd    = String(cliente.ddd      || '').trim();
-      const tel    = String(cliente.telefone || '').trim();
-      telefone_atual = ddd && tel ? `${ddd}${tel}` : (tel || '');
+      const celular = dddCel && cel ? `${dddCel}${cel}` : cel;
+      if (celular) celular_hint = `Atual: ${celular}`;
     }
   } catch (e) {
     console.warn('[handleSelecaoHorario] não foi possível buscar contatos:', e.message);
@@ -436,9 +440,8 @@ async function handleSelecaoHorario(data) {
       data_agendamento,
       hora_agendamento,
       observacao: observacao || '',
-      email_atual,
-      celular_atual,
-      telefone_atual,
+      email_hint,
+      celular_hint,
     },
   };
 }
@@ -541,18 +544,26 @@ async function handleContato(data) {
         data_agendamento,
         hora_agendamento,
         observacao: observacao || '',
-        email_atual: email || '',
-        celular_atual: celular || '',
-        telefone_atual: telefone || '',
+        email_hint: email ? `Atual: ${email}` : 'Ex: nome@email.com',
+        celular_hint: celular ? `Atual: ${celular}` : 'Ex: 11999999999',
         error_messages: { email: 'Erro ao confirmar o agendamento. Tente novamente.' },
       },
     };
   }
 
-  // Buscar nomes legíveis para o resumo final
-  let resumo_loja = cod_loja, resumo_servico = '', resumo_tecnico = 'Sem preferência de técnico';
-  const resumo_veiculo = modelo_veiculo ? `${modelo_veiculo}${placa ? ' – ' + placa : ''}` : placa || '';
-  const resumo_condutor = condutorLabel;
+  // Buscar nomes legíveis para o resumo final.
+  // Cada campo já inclui o label ("Concessionaria: ...") porque o WhatsApp Flows
+  // não interpola expressões embutidas em strings — o valor inteiro deve ser a expressão.
+  const veiculoLabel = modelo_veiculo
+    ? `${modelo_veiculo.trim()}${placa ? ' - ' + placa : ''}`
+    : (placa || 'Veiculo nao informado');
+
+  let resumo_loja     = `Concessionaria: ${cod_loja}`;
+  let resumo_servico  = 'Servico: (nao informado)';
+  let resumo_tecnico  = 'Tecnico/Mecanico: Sem preferencia';
+  const resumo_veiculo  = `Veiculo: ${veiculoLabel}`;
+  const resumo_condutor = `Condutor: ${condutorLabel}`;
+  const resumo_data     = `Data e hora: ${isoToBr(data_agendamento)} as ${hora_agendamento}`;
 
   try {
     const [lojasResult, servicosResult] = await Promise.all([
@@ -560,14 +571,14 @@ async function handleContato(data) {
       callMapsis('get_servicos'),
     ]);
     const loja = normalizeLojas(lojasResult).find(l => l.id === `${id_loja_mapsis}|${cod_loja}`);
-    resumo_loja = loja?.title || cod_loja;
+    resumo_loja = `Concessionaria: ${loja?.title || cod_loja}`;
     const servico = normalizeServicos(servicosResult).find(s => s.id === String(id_servico_mapsis));
-    resumo_servico = servico?.title || '';
+    resumo_servico = `Servico: ${servico?.title || '(nao informado)'}`;
 
     if (boxId) {
       const boxResult = await callMapsis('get_boxes', { cod_loja, id_loja_mapsis });
       const tecnico = normalizeTecnicos(boxResult).find(t => t.id === String(boxId));
-      resumo_tecnico = tecnico?.title || 'Técnico selecionado';
+      resumo_tecnico = `Tecnico/Mecanico: ${tecnico?.title || 'Selecionado'}`;
     }
   } catch { /* resumo com o que tiver */ }
 
@@ -576,7 +587,7 @@ async function handleContato(data) {
     data: {
       resumo_loja,
       resumo_servico,
-      resumo_data: `${isoToBr(data_agendamento)} às ${hora_agendamento}`,
+      resumo_data,
       resumo_tecnico,
       resumo_veiculo,
       resumo_condutor,
