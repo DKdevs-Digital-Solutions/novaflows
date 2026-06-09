@@ -6,7 +6,7 @@ import fetch from 'node-fetch';
 async function callMapsis(method, params = {}) {
   const { MAPSIS_URL, MAPSIS_USER, MAPSIS_PASS, MAPSIS_KEY } = process.env;
 
-  const url = new URL(`${MAPSIS_URL.replace(/\/$/, '')}/${method}.asp`);
+  const url = new URL(`${MAPSIS_URL.replace(/\/$/, '')}/api/mapsis/${method}.asp`);
   url.searchParams.set('usuario', MAPSIS_USER);
   url.searchParams.set('senha', MAPSIS_PASS);
   url.searchParams.set('chave', MAPSIS_KEY);
