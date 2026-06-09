@@ -348,17 +348,6 @@ async function handleSelecaoHorario(data) {
     id_box_mapsis, data_agendamento, hora_agendamento, observacao,
   } = data;
 
-  let email_prefill = '', celular_prefill = '', telefone_prefill = '';
-  try {
-    const clienteResult = await callMapsis('get_cliente', { cpf_cnpj });
-    const cliente = extractCliente(clienteResult, cpf_cnpj);
-    if (cliente) {
-      email_prefill = cliente.email || '';
-      celular_prefill = `${cliente.ddd_celular || ''}${cliente.celular || ''}`;
-      telefone_prefill = `${cliente.ddd || ''}${cliente.telefone || ''}`;
-    }
-  } catch { /* campos em branco */ }
-
   return {
     screen: 'CONTATO',
     data: {
@@ -368,9 +357,6 @@ async function handleSelecaoHorario(data) {
       data_agendamento,
       hora_agendamento,
       observacao: observacao || '',
-      email_prefill,
-      celular_prefill,
-      telefone_prefill,
     },
   };
 }
@@ -509,19 +495,31 @@ const HANDLERS = {
 };
 
 export async function handleWhatsAppFlows(req, res) {
+  // Log de cada requisição para diagnóstico
+  const isEncrypted = !!req.body?.encrypted_flow_data;
+  console.log(`[WA Flows] POST recebido | encriptado=${isEncrypted} | keys=${Object.keys(req.body || {}).join(',')}`);
+
   let decrypted, aesKey, iv;
 
   try {
     ({ decrypted, aesKey, iv } = decryptRequest(req.body));
   } catch (err) {
     console.error('[WA Flows] Descriptografia falhou:', err.message);
+    // Se a requisição parece ser um ping (sem dados de negócio), responde mesmo assim
+    // para não bloquear o health check de verificação de endpoint
+    if (!isEncrypted || !req.body?.encrypted_aes_key) {
+      console.warn('[WA Flows] Respondendo ping sem descriptografia (fallback)');
+      return res.json({ data: { status: 'active' } });
+    }
     return res.status(421).json({ error: 'Falha na descriptografia' });
   }
 
   const { action, data = {}, screen } = decrypted;
+  console.log(`[WA Flows] action=${action} screen=${screen || '-'}`);
 
   // Ping de saúde enviado pelo WhatsApp ao registrar o endpoint
   if (action === 'ping') {
+    console.log('[WA Flows] Ping recebido → respondendo active');
     const body = { data: { status: 'active' } };
     return res.json(encryptResponse(body, aesKey, iv));
   }
