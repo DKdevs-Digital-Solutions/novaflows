@@ -643,8 +643,7 @@ async function handleRevisao(data) {
       // Mídia/origem/aplicação do canal WhatsApp (valores cadastrados no MapSis)
       CalledFrom: 'WHATSAPP',
       origem: 'BLIP',
-      origem_lead: 'BLIP',
-      como_chegou: 'IA',
+      origem_lead: 'BLIP'
     });
   } catch (e) {
     saveResult = { retorno: { erro: 'Falha de comunicacao com o sistema.' } };
