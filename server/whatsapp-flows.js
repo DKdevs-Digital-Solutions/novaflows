@@ -125,9 +125,10 @@ function normalizeTecnicos(result) {
   const lista = (Array.isArray(raw) ? raw : [raw])
     .filter(t => t && (t.id_box_mapsis || t.id_consultor_mapsis))
     .filter(t => !excluidos.test(t.nome_produtivo || t.nome || ''))
+    .filter(t => (t.nome_produtivo || t.nome || '').trim().length > 0)
     .map(t => ({
       id: String(t.id_box_mapsis || t.id_consultor_mapsis),
-      title: t.nome_produtivo || t.nome || 'Técnico',
+      title: (t.nome_produtivo || t.nome || '').trim(),
     }));
   return [{ id: '0', title: 'Sem preferência' }, ...lista];
 }
@@ -137,7 +138,7 @@ function normalizeHorarios(result) {
   const seen = new Set();
   return (Array.isArray(raw) ? raw : [raw])
     .map(h => (typeof h === 'string' ? h : h?.horario || h?.hora || '').substring(0, 5))
-    .filter(t => t && /^\d{2}:\d{2}$/.test(t) && !seen.has(t) && seen.add(t))
+    .filter(t => t && /^\d{2}:\d{2}$/.test(t) && t.endsWith(':00') && !seen.has(t) && seen.add(t))
     .map(t => ({ id: t, title: t }));
 }
 
@@ -169,9 +170,12 @@ function parsePhone(phone = '') {
   return { ddd: clean.slice(0, 2), numero: clean.slice(2) };
 }
 
-// "2024-06-08" → "08/06/2024"
+// "2024-06-08" → "08/06/2024"  (fallback: retorna o original se não for YYYY-MM-DD)
 function isoToBr(iso = '') {
-  const [y, m, d] = iso.split('-');
+  const s = String(iso || '').trim();
+  const parts = s.split('-');
+  if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) return s;
+  const [y, m, d] = parts;
   return `${d}/${m}/${y}`;
 }
 
@@ -405,6 +409,24 @@ async function handleSelecaoHorario(data) {
     id_box_mapsis, data_agendamento, hora_agendamento, observacao,
   } = data;
 
+  // Buscar contatos do cliente para exibir como sugestão na tela CONTATO
+  let email_atual = '', celular_atual = '', telefone_atual = '';
+  try {
+    const clienteResult = await callMapsis('get_cliente', { cpf_cnpj });
+    const { cliente } = extractCliente(clienteResult);
+    if (cliente) {
+      email_atual = cliente.email || '';
+      const dddCel = String(cliente.ddd_celular || '').trim();
+      const cel    = String(cliente.celular     || '').trim();
+      celular_atual = dddCel && cel ? `${dddCel}${cel}` : (cel || '');
+      const ddd    = String(cliente.ddd      || '').trim();
+      const tel    = String(cliente.telefone || '').trim();
+      telefone_atual = ddd && tel ? `${ddd}${tel}` : (tel || '');
+    }
+  } catch (e) {
+    console.warn('[handleSelecaoHorario] não foi possível buscar contatos:', e.message);
+  }
+
   return {
     screen: 'CONTATO',
     data: {
@@ -414,6 +436,9 @@ async function handleSelecaoHorario(data) {
       data_agendamento,
       hora_agendamento,
       observacao: observacao || '',
+      email_atual,
+      celular_atual,
+      telefone_atual,
     },
   };
 }
@@ -424,7 +449,21 @@ async function handleContato(data) {
     id_loja_mapsis, cod_loja, id_box_mapsis,
     data_agendamento, hora_agendamento, observacao,
     email, celular, telefone,
+    condutor, nome_condutor,
   } = data;
+
+  // Monta string legível do condutor
+  const condutorLabel =
+    condutor === 'outros' && nome_condutor
+      ? `Outros – ${nome_condutor}`
+      : 'Proprietário';
+
+  // Inclui condutor na observação enviada ao MapSis (campo livre)
+  const obsPartes = [observacao || ''];
+  if (condutor === 'outros' && nome_condutor) {
+    obsPartes.push(`Condutor: ${nome_condutor}`);
+  }
+  const observacaoFinal = obsPartes.filter(Boolean).join(' | ');
 
   // Buscar dados completos do cliente e do veículo para o agendamento
   let nome_cliente = '', marca_veiculo = 'Chevrolet', modelo_veiculo = '',
@@ -481,7 +520,7 @@ async function handleContato(data) {
       chassi,
       data_agendamento: apiDate,
       hora_agendamento,
-      observacao: observacao || '',
+      observacao: observacaoFinal,
       status_agendamento: 'P',
       CalledFrom: 'WHATSAPP_FLOWS_NOVA_CHEVROLET',
       origem: 'WHATSAPP',
@@ -502,9 +541,9 @@ async function handleContato(data) {
         data_agendamento,
         hora_agendamento,
         observacao: observacao || '',
-        email_prefill: email,
-        celular_prefill: celular,
-        telefone_prefill: telefone || '',
+        email_atual: email || '',
+        celular_atual: celular || '',
+        telefone_atual: telefone || '',
         error_messages: { email: 'Erro ao confirmar o agendamento. Tente novamente.' },
       },
     };
@@ -512,6 +551,9 @@ async function handleContato(data) {
 
   // Buscar nomes legíveis para o resumo final
   let resumo_loja = cod_loja, resumo_servico = '', resumo_tecnico = 'Sem preferência de técnico';
+  const resumo_veiculo = modelo_veiculo ? `${modelo_veiculo}${placa ? ' – ' + placa : ''}` : placa || '';
+  const resumo_condutor = condutorLabel;
+
   try {
     const [lojasResult, servicosResult] = await Promise.all([
       callMapsis('get_lojas'),
@@ -536,6 +578,8 @@ async function handleContato(data) {
       resumo_servico,
       resumo_data: `${isoToBr(data_agendamento)} às ${hora_agendamento}`,
       resumo_tecnico,
+      resumo_veiculo,
+      resumo_condutor,
     },
   };
 }
