@@ -346,6 +346,7 @@ async function handleServicosLoja(data) {
       id_loja_mapsis,
       cod_loja,
       tecnicos: normalizeTecnicos(tecnicosResult),
+      msg_agenda: '',
     },
   };
 }
@@ -383,8 +384,9 @@ async function handleDataTecnico(data) {
         cpf_cnpj, id_cliente_mapsis, id_veiculo_mapsis,
         id_servico_mapsis, id_loja_mapsis, cod_loja,
         tecnicos: normalizeTecnicos(tecnicosResult),
+        msg_agenda: `Sem horarios disponiveis em ${apiDate}. Escolha outra data.`,
         error_messages: {
-          data_agendamento: 'Nenhum horário disponível nesta data. Tente outra data.',
+          data_agendamento: 'Sem horarios nesta data. Escolha outra.',
         },
       },
     };
@@ -612,8 +614,9 @@ async function handleRevisao(data) {
   const apiDate = isoToBr(data_agendamento);
   const boxId = info.boxId;
 
+  let saveResult;
   try {
-    await callMapsis('set_agendamento', {
+    saveResult = await callMapsis('set_agendamento', {
       cpf_cnpj,
       nome: info.nome_cliente,
       email,
@@ -637,18 +640,27 @@ async function handleRevisao(data) {
       hora_agendamento,
       observacao: observacaoFinal,
       status_agendamento: 'P',
+      // Valores de mídia/origem precisam existir no MapSis (iguais ao PWA)
       CalledFrom: 'WHATSAPP_FLOWS_NOVA_CHEVROLET',
-      origem: 'WHATSAPP',
-      origem_lead: 'WHATSAPP',
-      como_chegou: 'WHATSAPP FLOWS',
+      origem: 'SITE',
+      origem_lead: 'INTERNET',
+      como_chegou: 'LANDING PAGE',
     });
-  } catch {
-    // Falha ao gravar → permanece na revisão exibindo o erro
+  } catch (e) {
+    saveResult = { retorno: { erro: 'Falha de comunicacao com o sistema.' } };
+    console.error('[handleRevisao] set_agendamento exceção:', e.message);
+  }
+
+  // O MapSis devolve HTTP 200 mesmo em falha — o erro vem em retorno.erro.
+  // Sem checar isso, o agendamento "falha em silêncio" (igual getErroApi do PWA).
+  const erroSave = getErroApi(saveResult);
+  if (erroSave) {
+    console.warn('[handleRevisao] set_agendamento falhou:', erroSave);
     return {
       screen: 'REVISAO',
       data: {
         ...resumos,
-        msg_erro: 'Erro ao confirmar o agendamento. Tente novamente.',
+        msg_erro: `Nao foi possivel agendar: ${erroSave}`,
         ...forwardAgendamento(data, info, condutor, nome_condutor),
       },
     };
