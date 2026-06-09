@@ -446,38 +446,39 @@ async function handleSelecaoHorario(data) {
   };
 }
 
-async function handleContato(data) {
+// Monta a etiqueta legível do condutor
+function condutorLabelDe(condutor, nome_condutor) {
+  return condutor === 'outros' && nome_condutor
+    ? `Outros – ${nome_condutor}`
+    : 'Proprietário';
+}
+
+// Busca cliente + veículo + nomes de loja/serviço/técnico e resolve o contato
+// (usa o que o cliente digitou; se vazio, mantém o cadastrado). Reutilizado pela
+// tela de revisão e pela gravação final.
+async function coletarDados(data) {
   const {
-    cpf_cnpj, id_veiculo_mapsis, id_servico_mapsis,
-    id_loja_mapsis, cod_loja, id_box_mapsis,
-    data_agendamento, hora_agendamento, observacao,
-    email, celular, telefone,
-    condutor, nome_condutor,
+    cpf_cnpj, id_veiculo_mapsis, id_servico_mapsis, id_loja_mapsis, cod_loja,
+    id_box_mapsis, email, celular, telefone,
   } = data;
 
-  // Monta string legível do condutor
-  const condutorLabel =
-    condutor === 'outros' && nome_condutor
-      ? `Outros – ${nome_condutor}`
-      : 'Proprietário';
-
-  // Inclui condutor na observação enviada ao MapSis (campo livre)
-  const obsPartes = [observacao || ''];
-  if (condutor === 'outros' && nome_condutor) {
-    obsPartes.push(`Condutor: ${nome_condutor}`);
-  }
-  const observacaoFinal = obsPartes.filter(Boolean).join(' | ');
-
-  // Buscar dados completos do cliente e do veículo para o agendamento
   let nome_cliente = '', marca_veiculo = 'Chevrolet', modelo_veiculo = '',
     ano_fabricacao = '', ano_modelo = '', km_atual = '', placa = '', chassi = '';
+  let emailAtual = '', celularAtual = '', telefoneAtual = '';
 
   try {
     const clienteResult = await callMapsis('get_cliente', { cpf_cnpj });
     const { cliente } = extractCliente(clienteResult);
     if (cliente) {
       nome_cliente = cliente.nome_cliente || cliente.nome || '';
-      // Veículos na raiz do retorno (igual PWA)
+      emailAtual = String(cliente.email || '').trim();
+      const dddCel = String(cliente.ddd_celular || '').trim();
+      const celNum = String(cliente.celular || '').trim();
+      celularAtual = dddCel && celNum ? `${dddCel}${celNum}` : celNum;
+      const ddd = String(cliente.ddd || '').trim();
+      const telNum = String(cliente.telefone || '').trim();
+      telefoneAtual = ddd && telNum ? `${ddd}${telNum}` : telNum;
+
       const veicRaw = clienteResult?.veiculos ?? clienteResult?.veiculo ?? clienteResult?.Veiculo ?? [];
       const veiculos = Array.isArray(veicRaw) ? veicRaw : [veicRaw];
       const veiculo =
@@ -493,17 +494,128 @@ async function handleContato(data) {
         chassi = veiculo.chassis || veiculo.chassi || '';
       }
     }
-  } catch { /* agendamento prossegue sem dados completos */ }
+  } catch { /* prossegue sem dados completos */ }
+
+  // Contato efetivo: o que foi digitado tem prioridade; senão mantém o cadastrado
+  const emailFinal = String(email || '').trim() || emailAtual;
+  const celularFinal = String(celular || '').trim() || celularAtual;
+  const telefoneFinal = String(telefone || '').trim() || telefoneAtual;
+
+  // Nomes legíveis de loja / serviço / técnico
+  let lojaNome = cod_loja, servicoNome = '(nao informado)', tecnicoNome = 'Sem preferencia';
+  const boxId = id_box_mapsis && id_box_mapsis !== '0' ? id_box_mapsis : '';
+  try {
+    const [lojasResult, servicosResult] = await Promise.all([
+      callMapsis('get_lojas'),
+      callMapsis('get_servicos'),
+    ]);
+    lojaNome = normalizeLojas(lojasResult).find(l => l.id === `${id_loja_mapsis}|${cod_loja}`)?.title || cod_loja;
+    servicoNome = normalizeServicos(servicosResult).find(s => s.id === String(id_servico_mapsis))?.title || '(nao informado)';
+    if (boxId) {
+      const boxResult = await callMapsis('get_boxes', { cod_loja, id_loja_mapsis });
+      tecnicoNome = normalizeTecnicos(boxResult).find(t => t.id === String(boxId))?.title || 'Selecionado';
+    }
+  } catch { /* usa o que tiver */ }
+
+  return {
+    nome_cliente, marca_veiculo, modelo_veiculo, ano_fabricacao, ano_modelo,
+    km_atual, placa, chassi,
+    emailFinal, celularFinal, telefoneFinal,
+    lojaNome, servicoNome, tecnicoNome, boxId,
+  };
+}
+
+// Monta as strings de resumo (cada uma já inclui o rótulo, pois o WhatsApp Flows
+// não interpola expressões embutidas em texto — o valor inteiro deve ser a expressão).
+function montarResumos(data, info, condutorLabel) {
+  const veiculoLabel = info.modelo_veiculo
+    ? `${info.modelo_veiculo.trim()}${info.placa ? ' - ' + info.placa : ''}`
+    : (info.placa || 'Veiculo nao informado');
+
+  const contato = [info.emailFinal, info.celularFinal, info.telefoneFinal].filter(Boolean).join(' | ');
+  const obs = String(data.observacao || '').trim();
+
+  return {
+    resumo_veiculo:  `Veiculo: ${veiculoLabel}`,
+    resumo_servico:  `Servico: ${info.servicoNome}`,
+    resumo_loja:     `Concessionaria: ${info.lojaNome}`,
+    resumo_data:     `Data e hora: ${isoToBr(data.data_agendamento)} as ${data.hora_agendamento}`,
+    resumo_tecnico:  `Tecnico/Mecanico: ${info.tecnicoNome}`,
+    resumo_condutor: `Condutor: ${condutorLabel}`,
+    resumo_contato:  `Contato: ${contato || '(nao informado)'}`,
+    resumo_obs:      `Observacoes: ${obs || '(nenhuma)'}`,
+  };
+}
+
+// Campos crus repassados adiante para que a tela de revisão possa gravar depois
+function forwardAgendamento(data, info, condutor, nome_condutor) {
+  return {
+    cpf_cnpj: data.cpf_cnpj,
+    id_cliente_mapsis: data.id_cliente_mapsis || '',
+    id_veiculo_mapsis: data.id_veiculo_mapsis,
+    id_servico_mapsis: data.id_servico_mapsis,
+    id_loja_mapsis: data.id_loja_mapsis,
+    cod_loja: data.cod_loja,
+    id_box_mapsis: data.id_box_mapsis || '0',
+    data_agendamento: data.data_agendamento,
+    hora_agendamento: data.hora_agendamento,
+    observacao: data.observacao || '',
+    condutor: condutor || 'proprietario',
+    nome_condutor: nome_condutor || '',
+    // contato já resolvido (digitado ou o cadastrado)
+    email: info.emailFinal,
+    celular: info.celularFinal,
+    telefone: info.telefoneFinal,
+  };
+}
+
+// CONTATO → monta a tela de REVISÃO com tudo preenchido (ainda NÃO grava)
+async function handleContato(data) {
+  const { condutor, nome_condutor } = data;
+  const condutorLabel = condutorLabelDe(condutor, nome_condutor);
+
+  const info = await coletarDados(data);
+  const resumos = montarResumos(data, info, condutorLabel);
+
+  return {
+    screen: 'REVISAO',
+    data: {
+      ...resumos,
+      msg_erro: '',
+      ...forwardAgendamento(data, info, condutor, nome_condutor),
+    },
+  };
+}
+
+// REVISAO → grava o agendamento e finaliza (CONFIRMACAO)
+async function handleRevisao(data) {
+  const {
+    cpf_cnpj, id_veiculo_mapsis, id_servico_mapsis,
+    id_loja_mapsis, cod_loja,
+    data_agendamento, hora_agendamento, observacao,
+    email, celular, telefone,
+    condutor, nome_condutor,
+  } = data;
+
+  const condutorLabel = condutorLabelDe(condutor, nome_condutor);
+
+  // Anexa o condutor na observação enviada ao MapSis (campo livre)
+  const obsPartes = [observacao || ''];
+  if (condutor === 'outros' && nome_condutor) obsPartes.push(`Condutor: ${nome_condutor}`);
+  const observacaoFinal = obsPartes.filter(Boolean).join(' | ');
+
+  const info = await coletarDados(data);
+  const resumos = montarResumos(data, info, condutorLabel);
 
   const cel = parsePhone(celular);
   const tel = parsePhone(telefone || '');
   const apiDate = isoToBr(data_agendamento);
-  const boxId = id_box_mapsis && id_box_mapsis !== '0' ? id_box_mapsis : '';
+  const boxId = info.boxId;
 
   try {
     await callMapsis('set_agendamento', {
       cpf_cnpj,
-      nome: nome_cliente,
+      nome: info.nome_cliente,
       email,
       ddd: tel.ddd,
       telefone: tel.numero,
@@ -514,13 +626,13 @@ async function handleContato(data) {
       id_servico_mapsis,
       id_veiculo_mapsis,
       ...(boxId ? { id_box: boxId } : {}),
-      marca_veiculo,
-      modelo_veiculo,
-      ano_fabricacao,
-      ano_modelo,
-      km_atual,
-      placa,
-      chassi,
+      marca_veiculo: info.marca_veiculo,
+      modelo_veiculo: info.modelo_veiculo,
+      ano_fabricacao: info.ano_fabricacao,
+      ano_modelo: info.ano_modelo,
+      km_atual: info.km_atual,
+      placa: info.placa,
+      chassi: info.chassi,
       data_agendamento: apiDate,
       hora_agendamento,
       observacao: observacaoFinal,
@@ -531,66 +643,28 @@ async function handleContato(data) {
       como_chegou: 'WHATSAPP FLOWS',
     });
   } catch {
+    // Falha ao gravar → permanece na revisão exibindo o erro
     return {
-      screen: 'CONTATO',
+      screen: 'REVISAO',
       data: {
-        cpf_cnpj,
-        id_cliente_mapsis: data.id_cliente_mapsis,
-        id_veiculo_mapsis,
-        id_servico_mapsis,
-        id_loja_mapsis,
-        cod_loja,
-        id_box_mapsis: id_box_mapsis || '0',
-        data_agendamento,
-        hora_agendamento,
-        observacao: observacao || '',
-        email_hint: email ? `Atual: ${email}` : 'Ex: nome@email.com',
-        celular_hint: celular ? `Atual: ${celular}` : 'Ex: 11999999999',
-        error_messages: { email: 'Erro ao confirmar o agendamento. Tente novamente.' },
+        ...resumos,
+        msg_erro: 'Erro ao confirmar o agendamento. Tente novamente.',
+        ...forwardAgendamento(data, info, condutor, nome_condutor),
       },
     };
   }
 
-  // Buscar nomes legíveis para o resumo final.
-  // Cada campo já inclui o label ("Concessionaria: ...") porque o WhatsApp Flows
-  // não interpola expressões embutidas em strings — o valor inteiro deve ser a expressão.
-  const veiculoLabel = modelo_veiculo
-    ? `${modelo_veiculo.trim()}${placa ? ' - ' + placa : ''}`
-    : (placa || 'Veiculo nao informado');
-
-  let resumo_loja     = `Concessionaria: ${cod_loja}`;
-  let resumo_servico  = 'Servico: (nao informado)';
-  let resumo_tecnico  = 'Tecnico/Mecanico: Sem preferencia';
-  const resumo_veiculo  = `Veiculo: ${veiculoLabel}`;
-  const resumo_condutor = `Condutor: ${condutorLabel}`;
-  const resumo_data     = `Data e hora: ${isoToBr(data_agendamento)} as ${hora_agendamento}`;
-
-  try {
-    const [lojasResult, servicosResult] = await Promise.all([
-      callMapsis('get_lojas'),
-      callMapsis('get_servicos'),
-    ]);
-    const loja = normalizeLojas(lojasResult).find(l => l.id === `${id_loja_mapsis}|${cod_loja}`);
-    resumo_loja = `Concessionaria: ${loja?.title || cod_loja}`;
-    const servico = normalizeServicos(servicosResult).find(s => s.id === String(id_servico_mapsis));
-    resumo_servico = `Servico: ${servico?.title || '(nao informado)'}`;
-
-    if (boxId) {
-      const boxResult = await callMapsis('get_boxes', { cod_loja, id_loja_mapsis });
-      const tecnico = normalizeTecnicos(boxResult).find(t => t.id === String(boxId));
-      resumo_tecnico = `Tecnico/Mecanico: ${tecnico?.title || 'Selecionado'}`;
-    }
-  } catch { /* resumo com o que tiver */ }
-
   return {
     screen: 'CONFIRMACAO',
     data: {
-      resumo_loja,
-      resumo_servico,
-      resumo_data,
-      resumo_tecnico,
-      resumo_veiculo,
-      resumo_condutor,
+      resumo_loja: resumos.resumo_loja,
+      resumo_servico: resumos.resumo_servico,
+      resumo_data: resumos.resumo_data,
+      resumo_tecnico: resumos.resumo_tecnico,
+      resumo_veiculo: resumos.resumo_veiculo,
+      resumo_condutor: resumos.resumo_condutor,
+      resumo_contato: resumos.resumo_contato,
+      resumo_obs: resumos.resumo_obs,
     },
   };
 }
@@ -605,6 +679,7 @@ const HANDLERS = {
   DATA_TECNICO: handleDataTecnico,
   SELECAO_HORARIO: handleSelecaoHorario,
   CONTATO: handleContato,
+  REVISAO: handleRevisao,
 };
 
 export async function handleWhatsAppFlows(req, res) {
