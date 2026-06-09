@@ -1,8 +1,6 @@
 services:
   nova-chevrolet-server:
-    build: .
-    container_name: nova-chevrolet-server
-    restart: unless-stopped
+    image: nova-chevrolet-server:latest
     environment:
       - PORT=${PORT}
       - MAPSIS_URL=${MAPSIS_URL}
@@ -10,25 +8,22 @@ services:
       - MAPSIS_PASS=${MAPSIS_PASS}
       - MAPSIS_KEY=${MAPSIS_KEY}
       - WHATSAPP_PRIVATE_KEY=${WHATSAPP_PRIVATE_KEY}
-    # Porta não exposta ao host — Traefik acessa via rede interna
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
     labels:
       - "traefik.enable=true"
-
-      # HTTPS
       - "traefik.http.routers.nova-chevrolet.rule=Host(`novachev.dkdevs.com.br`)"
       - "traefik.http.routers.nova-chevrolet.entrypoints=websecure"
       - "traefik.http.routers.nova-chevrolet.tls.certresolver=letsencrypt"
-
-      # HTTP → redireciona para HTTPS
       - "traefik.http.routers.nova-chevrolet-http.rule=Host(`novachev.dkdevs.com.br`)"
       - "traefik.http.routers.nova-chevrolet-http.entrypoints=web"
       - "traefik.http.routers.nova-chevrolet-http.middlewares=https-redirect@docker"
-
-      # Porta interna do container
       - "traefik.http.services.nova-chevrolet.loadbalancer.server.port=3001"
     networks:
       - traefik
 
 networks:
   traefik:
-    external: true   # rede criada pelo docker-compose.traefik.yml
+    external: true
