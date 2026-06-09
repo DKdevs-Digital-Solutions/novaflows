@@ -18,10 +18,18 @@ async function callMapsis(method, params = {}) {
     }
   }
 
+  // Log da URL sem expor credenciais
+  const safeUrl = url.toString()
+    .replace(/(usuario=)[^&]*/, '$1***')
+    .replace(/(senha=)[^&]*/, '$1***')
+    .replace(/(chave=)[^&]*/, '$1***');
+  console.log(`[MapSis] → ${method} | ${safeUrl}`);
+
   const res = await fetch(url.toString(), {
     headers: { Accept: 'application/json, text/plain, */*' },
   });
   const text = await res.text();
+  console.log(`[MapSis] ← ${method} | status=${res.status} | body=${text.slice(0, 800)}`);
   try { return JSON.parse(text); } catch { return { raw: text }; }
 }
 
@@ -86,12 +94,22 @@ function sendFlowResponse(res, data, aesKey, iv) {
 
 function normalizeLojas(result) {
   const raw = result?.lojas || result?.Lojas || result?.loja || [];
-  return (Array.isArray(raw) ? raw : [raw])
-    .filter(l => l?.id_loja_mapsis || l?.cod_loja)
-    .map(l => ({
-      id: `${l.id_loja_mapsis}|${l.cod_loja}`,
-      title: l.nome || l.nome_loja || 'Concessionária',
-    }));
+  const all = (Array.isArray(raw) ? raw : [raw])
+    .filter(l => l && (l.id_loja_mapsis || l.id || l.cod_loja));
+
+  // Mesmo filtro do PWA: só Tatuapé e João Dias (com fallback para todas)
+  const filtradas = all.filter(l => {
+    const nome = String(l.nome ?? l.nome_loja ?? '').toUpperCase();
+    return nome.includes('TATUAP') || (nome.includes('JO') && nome.includes('DIAS'));
+  });
+  const lista = filtradas.length > 0 ? filtradas : all;
+
+  console.log(`[normalizeLojas] total=${all.length} filtradas=${filtradas.length} → usando=${lista.length}`);
+
+  return lista.map(l => ({
+    id: `${l.id_loja_mapsis ?? l.id ?? ''}|${l.cod_loja ?? ''}`,
+    title: l.nome || l.nome_loja || 'Concessionária',
+  }));
 }
 
 function normalizeServicos(result) {
@@ -123,10 +141,27 @@ function normalizeHorarios(result) {
     .map(t => ({ id: t, title: t }));
 }
 
-function extractCliente(result, cpf_cnpj) {
-  const raw = result?.cliente || result?.clientes || result?.Cliente || [];
-  const arr = Array.isArray(raw) ? raw : [raw];
-  return arr.find(c => c?.cpf_cnpj === cpf_cnpj || c?.id_cliente_mapsis) || null;
+// Mensagem de erro vinda da API MapSis (igual getErroApi do PWA)
+function getErroApi(p) {
+  const e = p?.retorno?.erro ?? p?.erro ?? p?.error;
+  return typeof e === 'string' && e.trim() ? e : null;
+}
+
+// Espelha a lógica do PWA: cliente fica em result.cliente (array ou objeto);
+// "existe" = array não-vazio OU id_cliente_mapsis na raiz. NÃO compara cpf_cnpj
+// (a API pode devolver o documento em formato diferente, com/sem zero à esquerda).
+function extractCliente(result) {
+  const raw = result?.cliente ?? result?.clientes ?? result?.Cliente ?? [];
+  const arr = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+  const erro = getErroApi(result);
+  const existe = (arr.length > 0 || !!result?.id_cliente_mapsis) && !erro;
+
+  console.log(`[extractCliente] chaves topo=${Object.keys(result || {}).join(',')} | registros=${arr.length} | erro=${erro || '-'} | existe=${existe}`);
+  if (arr[0]) {
+    console.log(`  cliente[0]: cpf=${JSON.stringify(arr[0].cpf_cnpj)} id=${JSON.stringify(arr[0].id_cliente_mapsis)} nome=${JSON.stringify(arr[0].nome_cliente || arr[0].nome)}`);
+  }
+
+  return { existe, cliente: arr[0] || null };
 }
 
 function parsePhone(phone = '') {
@@ -148,40 +183,47 @@ async function handleInit() {
 
 async function handleIdentificacao({ cpf_cnpj }) {
   const doc = cpf_cnpj.replace(/\D/g, '');
+  console.log(`[handleIdentificacao] cpf_cnpj recebido=${JSON.stringify(cpf_cnpj)} → normalizado=${JSON.stringify(doc)}`);
 
   let clienteResult;
   try {
     clienteResult = await callMapsis('get_cliente', { cpf_cnpj: doc });
-  } catch {
+  } catch (err) {
+    console.error(`[handleIdentificacao] erro get_cliente: ${err.message}`);
     return {
       screen: 'IDENTIFICACAO',
       data: { error_messages: { cpf_cnpj: 'Erro ao consultar dados. Tente novamente.' } },
     };
   }
 
-  const cliente = extractCliente(clienteResult, doc);
+  const { existe, cliente } = extractCliente(clienteResult);
 
-  if (cliente?.id_cliente_mapsis) {
-    const veicRaw = cliente.veiculos || cliente.veiculo || cliente.Veiculo || [];
+  if (existe) {
+    // IMPORTANTE: os veículos vêm na RAIZ do retorno (result.veiculos), não dentro
+    // do objeto cliente — exatamente como o PWA lê (clientePayload?.veiculos)
+    const veicRaw = clienteResult?.veiculos ?? clienteResult?.veiculo ?? clienteResult?.Veiculo ?? [];
     const veiculos = (Array.isArray(veicRaw) ? veicRaw : [veicRaw])
       .filter(v => v?.id_veiculo_mapsis)
       .map(v => ({
         id: String(v.id_veiculo_mapsis),
-        title: `${v.modelo_carro || v.modelo || 'Veículo'} – ${v.placa || 'S/Placa'}`,
+        title: `${v.modelo_carro || v.modelo || 'Veiculo'} - ${v.placa || 'S/Placa'}`,
       }));
+
+    console.log(`[handleIdentificacao] cliente encontrado → ${veiculos.length} veículo(s)`);
 
     return {
       screen: 'SELECAO_VEICULO',
       data: {
-        nome_cliente: cliente.nome_cliente || cliente.nome || 'Cliente',
+        nome_cliente: cliente?.nome_cliente || cliente?.nome || 'Cliente',
         cpf_cnpj: doc,
-        id_cliente_mapsis: String(cliente.id_cliente_mapsis),
-        veiculos: veiculos.length ? veiculos : [{ id: '0', title: 'Nenhum veículo cadastrado' }],
+        id_cliente_mapsis: String(cliente?.id_cliente_mapsis ?? clienteResult?.id_cliente_mapsis ?? ''),
+        veiculos: veiculos.length ? veiculos : [{ id: '0', title: 'Nenhum veiculo cadastrado' }],
       },
     };
   }
 
   // Cliente não encontrado → tela de cadastro
+  console.log('[handleIdentificacao] cliente NÃO encontrado → CADASTRO');
   let lojasResult = {};
   try { lojasResult = await callMapsis('get_lojas'); } catch { /* continua */ }
 
@@ -201,7 +243,8 @@ async function handleCadastro(data) {
   const cel = parsePhone(celular);
   const tel = parsePhone(telefone || '');
   // cod_loja vem como "id_loja_mapsis|cod_loja_real"
-  const [, codLojaReal] = (cod_loja || '').split('|');
+  // O PWA envia id_loja_mapsis no campo cod_loja do set_cliente (comportamento testado)
+  const [idLojaMapsis] = (cod_loja || '').split('|');
 
   try {
     await callMapsis('set_cliente', {
@@ -221,7 +264,7 @@ async function handleCadastro(data) {
       ano_mod: ano_modelo || ano_fabricacao,
       km: km_atual,
       data_compra: data_compra || '',
-      cod_loja: codLojaReal || cod_loja,
+      cod_loja: idLojaMapsis || cod_loja,
     });
   } catch {
     let lojasResult = {};
@@ -238,8 +281,9 @@ async function handleCadastro(data) {
 
   // Re-buscar cliente para obter os IDs gerados
   const clienteResult = await callMapsis('get_cliente', { cpf_cnpj });
-  const cliente = extractCliente(clienteResult, cpf_cnpj);
-  const veicRaw = cliente?.veiculos || cliente?.veiculo || [];
+  const { cliente } = extractCliente(clienteResult);
+  // Veículos vêm na raiz do retorno (igual PWA)
+  const veicRaw = clienteResult?.veiculos ?? clienteResult?.veiculo ?? clienteResult?.Veiculo ?? [];
   const veiculos = Array.isArray(veicRaw) ? veicRaw : [veicRaw];
   const primeiroVeiculo = veiculos[0];
 
@@ -388,10 +432,11 @@ async function handleContato(data) {
 
   try {
     const clienteResult = await callMapsis('get_cliente', { cpf_cnpj });
-    const cliente = extractCliente(clienteResult, cpf_cnpj);
+    const { cliente } = extractCliente(clienteResult);
     if (cliente) {
       nome_cliente = cliente.nome_cliente || cliente.nome || '';
-      const veicRaw = cliente.veiculos || cliente.veiculo || [];
+      // Veículos na raiz do retorno (igual PWA)
+      const veicRaw = clienteResult?.veiculos ?? clienteResult?.veiculo ?? clienteResult?.Veiculo ?? [];
       const veiculos = Array.isArray(veicRaw) ? veicRaw : [veicRaw];
       const veiculo =
         veiculos.find(v => String(v.id_veiculo_mapsis) === String(id_veiculo_mapsis)) ||
