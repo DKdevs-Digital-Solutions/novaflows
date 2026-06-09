@@ -1,29 +1,64 @@
+# Nova Chevrolet — WhatsApp Flows endpoint — Docker SWARM, SEM imagem própria / SEM registry.
+# Usa node:20-alpine, clona este repo e roda na inicialização.
+# Você já tem Traefik (provider swarm, rede traefik-public, resolver letsencrypt).
+#
+# Portainer → Stacks → Add stack → Repository:
+#   Repository URL : https://github.com/SEU-ORG/nova-chevrolet.git
+#   Compose path   : stack.yml   |  Authentication = user + PAT (repo privado)
+#
+# Environment variables (adicionar no Portainer):
+#   GIT_TOKEN              ← PAT do GitHub (leitura no repo)
+#   MAPSIS_URL  MAPSIS_USER  MAPSIS_PASS  MAPSIS_KEY
+#   WHATSAPP_PRIVATE_KEY   ← conteúdo do private.pem em uma linha com \n escapado
+
+networks:
+  traefik:
+    external: true
+    name: traefik-public
+
 services:
-  nova-chevrolet-server:
-    image: nova-chevrolet-server:latest
+  nova-chevrolet:
+    image: node:20-alpine
+    command:
+      - sh
+      - -c
+      - |
+        apk add --no-cache git
+        rm -rf /app && git clone --depth 1 "https://github.com/DKdevs-Digital-Solutions/novaflows.git" /app
+        cd /app && npm install --omit=dev
+        exec node server/index.js
     environment:
-      - PORT=${PORT}
+      - NODE_ENV=production
+      - PORT=3001
       - MAPSIS_URL=${MAPSIS_URL}
       - MAPSIS_USER=${MAPSIS_USER}
       - MAPSIS_PASS=${MAPSIS_PASS}
       - MAPSIS_KEY=${MAPSIS_KEY}
       - WHATSAPP_PRIVATE_KEY=${WHATSAPP_PRIVATE_KEY}
-    deploy:
-      replicas: 1
-      restart_policy:
-        condition: on-failure
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.nova-chevrolet.rule=Host(`novachev.dkdevs.com.br`)"
-      - "traefik.http.routers.nova-chevrolet.entrypoints=websecure"
-      - "traefik.http.routers.nova-chevrolet.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.nova-chevrolet-http.rule=Host(`novachev.dkdevs.com.br`)"
-      - "traefik.http.routers.nova-chevrolet-http.entrypoints=web"
-      - "traefik.http.routers.nova-chevrolet-http.middlewares=https-redirect@docker"
-      - "traefik.http.services.nova-chevrolet.loadbalancer.server.port=3001"
     networks:
       - traefik
+    deploy:
+      replicas: 1
+      restart_policy: { condition: any }
+      update_config: { parallelism: 1, order: start-first }
+      labels:
+        - traefik.enable=true
+        - traefik.swarm.network=traefik-public
 
-networks:
-  traefik:
-    external: true
+        # HTTP → HTTPS
+        - traefik.http.routers.nova-chevrolet-http.rule=Host(`novachev.dkdevs.com.br`)
+        - traefik.http.routers.nova-chevrolet-http.entrypoints=web
+        - traefik.http.routers.nova-chevrolet-http.middlewares=nova-chevrolet-redirect
+        - traefik.http.routers.nova-chevrolet-http.service=nova-chevrolet-svc
+        - traefik.http.middlewares.nova-chevrolet-redirect.redirectscheme.scheme=https
+        - traefik.http.middlewares.nova-chevrolet-redirect.redirectscheme.permanent=true
+
+        # HTTPS
+        - traefik.http.routers.nova-chevrolet-https.rule=Host(`novachev.dkdevs.com.br`)
+        - traefik.http.routers.nova-chevrolet-https.entrypoints=websecure
+        - traefik.http.routers.nova-chevrolet-https.tls=true
+        - traefik.http.routers.nova-chevrolet-https.tls.certresolver=letsencrypt
+        - traefik.http.routers.nova-chevrolet-https.service=nova-chevrolet-svc
+
+        # Porta interna do Node
+        - traefik.http.services.nova-chevrolet-svc.loadbalancer.server.port=3001
