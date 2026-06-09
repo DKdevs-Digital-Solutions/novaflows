@@ -142,6 +142,17 @@ function normalizeHorarios(result) {
     .map(t => ({ id: t, title: t }));
 }
 
+// Extrai os slots da agenda como pares { box, hora } (grade de box).
+// Na grade de consultor o MapSis devolve só strings "HH:mm" (sem box) → box vazio.
+function extrairSlots(result) {
+  const raw = result?.horarios || result?.Horarios || [];
+  return (Array.isArray(raw) ? raw : [raw])
+    .map(s => (typeof s === 'string'
+      ? { box: '', hora: s.substring(0, 5) }
+      : { box: String(s?.box ?? s?.id_box_mapsis ?? ''), hora: String(s?.horario ?? s?.hora ?? '').substring(0, 5) }))
+    .filter(s => /^\d{2}:\d{2}$/.test(s.hora));
+}
+
 // Mensagem de erro vinda da API MapSis (igual getErroApi do PWA)
 function getErroApi(p) {
   const e = p?.retorno?.erro ?? p?.erro ?? p?.error;
@@ -359,8 +370,10 @@ async function handleDataTecnico(data) {
   } = data;
 
   const apiDate = isoToBr(data_agendamento);
-  const boxId = id_box_mapsis && id_box_mapsis !== '0' ? id_box_mapsis : '';
 
+  // Consulta a grade de TODOS os boxes (sem fixar id_box_mapsis): o MapSis devolve
+  // cada horário livre marcado com seu box. Assim mostramos toda a disponibilidade
+  // da data e, ao agendar, escolhemos um box que realmente tenha o horário.
   let horariosResult = {};
   try {
     horariosResult = await callMapsis('get_agenda_horario_disponivel', {
@@ -369,7 +382,6 @@ async function handleDataTecnico(data) {
       id_servico_mapsis,
       data_agendamento: apiDate,
       retorno_consultor: '0',
-      ...(boxId ? { id_box_mapsis: boxId } : {}),
     });
   } catch { /* sem horários */ }
 
@@ -614,47 +626,88 @@ async function handleRevisao(data) {
   const apiDate = isoToBr(data_agendamento);
   const boxId = info.boxId;
 
-  let saveResult;
+  // Campos comuns a qualquer tentativa de agendamento (sem o box)
+  const basePayload = {
+    cpf_cnpj,
+    nome: info.nome_cliente,
+    email,
+    ddd: tel.ddd,
+    telefone: tel.numero,
+    ddd_celular: cel.ddd,
+    celular: cel.numero,
+    cod_loja,
+    id_loja_mapsis,
+    id_servico_mapsis,
+    id_veiculo_mapsis,
+    marca_veiculo: info.marca_veiculo,
+    modelo_veiculo: info.modelo_veiculo,
+    ano_fabricacao: info.ano_fabricacao,
+    ano_modelo: info.ano_modelo,
+    km_atual: info.km_atual,
+    placa: info.placa,
+    chassi: info.chassi,
+    data_agendamento: apiDate,
+    hora_agendamento,
+    status_agendamento: 'P',
+    // Mídia/origem/aplicação do canal WhatsApp (valores cadastrados no MapSis)
+    CalledFrom: 'WHATSAPP',
+    origem: 'BLIP',
+    origem_lead: 'BLIP',
+    como_chegou: 'IA',
+  };
+
+  // Faz uma tentativa de set_agendamento e devolve o erro do MapSis (ou null)
+  const tentarAgendar = async (extra, obs) => {
+    try {
+      const r = await callMapsis('set_agendamento', { ...basePayload, ...extra, observacao: obs });
+      return getErroApi(r);
+    } catch (e) {
+      console.error('[handleRevisao] set_agendamento exceção:', e.message);
+      return 'Falha de comunicacao com o sistema.';
+    }
+  };
+
+  // Re-consulta a agenda (todos os boxes) no momento da gravação para descobrir
+  // quais boxes têm o horário escolhido REALMENTE livre. Isso elimina o
+  // "agenda mostrou vaga mas o set_agendamento recusou": só agendamos num box
+  // que a própria agenda acabou de confirmar como disponível.
+  let agendaResult = {};
   try {
-    saveResult = await callMapsis('set_agendamento', {
-      cpf_cnpj,
-      nome: info.nome_cliente,
-      email,
-      ddd: tel.ddd,
-      telefone: tel.numero,
-      ddd_celular: cel.ddd,
-      celular: cel.numero,
-      cod_loja,
-      id_loja_mapsis,
-      id_servico_mapsis,
-      id_veiculo_mapsis,
-      ...(boxId ? { id_box: boxId } : {}),
-      marca_veiculo: info.marca_veiculo,
-      modelo_veiculo: info.modelo_veiculo,
-      ano_fabricacao: info.ano_fabricacao,
-      ano_modelo: info.ano_modelo,
-      km_atual: info.km_atual,
-      placa: info.placa,
-      chassi: info.chassi,
-      data_agendamento: apiDate,
-      hora_agendamento,
-      observacao: observacaoFinal,
-      status_agendamento: 'P',
-      // Mídia/origem/aplicação do canal WhatsApp (valores cadastrados no MapSis)
-      CalledFrom: 'WHATSAPP',
-      origem: 'BLIP',
-      origem_lead: 'BLIP'
+    agendaResult = await callMapsis('get_agenda_horario_disponivel', {
+      id_veiculo_mapsis, id_loja_mapsis, id_servico_mapsis,
+      data_agendamento: apiDate, retorno_consultor: '0',
     });
-  } catch (e) {
-    saveResult = { retorno: { erro: 'Falha de comunicacao com o sistema.' } };
-    console.error('[handleRevisao] set_agendamento exceção:', e.message);
+  } catch { /* sem agenda */ }
+
+  // Boxes que têm o horário escolhido livre — com o box preferido na frente
+  const boxesComHora = [...new Set(
+    extrairSlots(agendaResult).filter(s => s.hora === hora_agendamento).map(s => s.box)
+  )];
+  const ordemBoxes = boxId && boxesComHora.includes(String(boxId))
+    ? [String(boxId), ...boxesComHora.filter(b => b !== String(boxId))]
+    : boxesComHora;
+
+  let erroSave = null;
+  if (ordemBoxes.length && ordemBoxes.some(Boolean)) {
+    // Tenta cada box (preferido primeiro) até um aceitar
+    erroSave = 'Horario indisponivel.';
+    for (const bx of ordemBoxes.filter(Boolean)) {
+      const obs = (boxId && bx !== String(boxId))
+        ? [observacaoFinal, `Mecanico preferido: ${info.tecnicoNome}`].filter(Boolean).join(' | ')
+        : observacaoFinal;
+      erroSave = await tentarAgendar({ id_box: bx }, obs);
+      if (!erroSave) break;
+      console.warn(`[handleRevisao] box ${bx} recusou (${erroSave}). Tentando proximo box...`);
+    }
+  } else {
+    // Grade de consultor (sem box) ou agenda indisponível → deixa o MapSis alocar
+    erroSave = await tentarAgendar({}, observacaoFinal);
   }
 
-  // O MapSis devolve HTTP 200 mesmo em falha — o erro vem em retorno.erro.
-  // Sem checar isso, o agendamento "falha em silêncio" (igual getErroApi do PWA).
-  const erroSave = getErroApi(saveResult);
+  // O MapSis devolve HTTP 200 mesmo em falha — o erro vem em retorno.erro
+  // (igual getErroApi do PWA). Só mostramos erro se nem o fallback funcionou.
   if (erroSave) {
-    console.warn('[handleRevisao] set_agendamento falhou:', erroSave);
+    console.warn('[handleRevisao] set_agendamento falhou definitivamente:', erroSave);
     return {
       screen: 'REVISAO',
       data: {
