@@ -651,9 +651,9 @@ async function handleRevisao(data) {
     status_agendamento: 'P',
     // Mídia/origem/aplicação do canal WhatsApp (valores cadastrados no MapSis)
     CalledFrom: 'WHATSAPP',
-    origem: 'BLIP',
-    origem_lead: 'BLIP',
-    como_chegou: 'IA',
+    origem: 'BLIP - RECEPTIVO',
+    origem_lead: 'BLIP - RECEPTIVO',
+    como_chegou: 'BLIP - RECEPTIVO',
   };
 
   // Faz uma tentativa de set_agendamento e devolve o erro do MapSis (ou null)
