@@ -29,8 +29,10 @@ async function callMapsis(method, params = {}) {
 
 function decryptRequest(body) {
   const raw = process.env.WHATSAPP_PRIVATE_KEY;
-  // Normaliza \n escapados que surgem ao passar chave via variável de ambiente
-  const privateKey = raw?.includes('\\n') ? raw.replace(/\\n/g, '\n') : raw;
+  // Remove aspas que usuários colam acidentalmente ("-----BEGIN..." → -----BEGIN...)
+  // e normaliza \n literais (formato de linha única) para quebras reais
+  const cleaned = raw?.replace(/^["']|["']$/g, '');
+  const privateKey = cleaned?.includes('\\n') ? cleaned.replace(/\\n/g, '\n') : cleaned;
 
   // Dev mode: sem chave configurada → body chega como JSON puro
   if (!privateKey || !body.encrypted_flow_data) {
