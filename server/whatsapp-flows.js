@@ -59,16 +59,27 @@ function decryptRequest(body) {
   return { decrypted, aesKey, iv };
 }
 
+// Retorna o base64 cru da resposta criptografada (string), ou null em modo dev
+// (sem chave). O WhatsApp Flows espera o base64 como texto puro no body — NÃO JSON.
 function encryptResponse(data, aesKey, iv) {
-  if (!aesKey || !iv) return data;
+  if (!aesKey || !iv) return null;
 
-  const flippedIV = iv.map(b => ~b & 0xff);
+  const flippedIV = Buffer.from(iv.map(b => ~b & 0xff));
   const cipher = crypto.createCipheriv('aes-128-gcm', aesKey, flippedIV);
   const encrypted = Buffer.concat([
     cipher.update(JSON.stringify(data), 'utf8'),
     cipher.final(),
   ]);
-  return { response: Buffer.concat([encrypted, cipher.getAuthTag()]).toString('base64') };
+  return Buffer.concat([encrypted, cipher.getAuthTag()]).toString('base64');
+}
+
+// Envia a resposta no formato que o WhatsApp Flows exige:
+// - Com criptografia: base64 puro, Content-Type text/plain
+// - Modo dev (sem chave): JSON normal para facilitar testes locais
+function sendFlowResponse(res, data, aesKey, iv) {
+  const encrypted = encryptResponse(data, aesKey, iv);
+  if (encrypted) return res.type('text/plain').send(encrypted);
+  return res.json(data);
 }
 
 // ─── Normalizers ─────────────────────────────────────────────────────────────
@@ -522,8 +533,7 @@ export async function handleWhatsAppFlows(req, res) {
   // Ping de saúde enviado pelo WhatsApp ao registrar o endpoint
   if (action === 'ping') {
     console.log('[WA Flows] Ping recebido → respondendo active');
-    const body = { data: { status: 'active' } };
-    return res.json(encryptResponse(body, aesKey, iv));
+    return sendFlowResponse(res, { data: { status: 'active' } }, aesKey, iv);
   }
 
   let result;
@@ -545,6 +555,6 @@ export async function handleWhatsAppFlows(req, res) {
     };
   }
 
-  const response = { version: '3.1', screen: result.screen, data: result.data };
-  res.json(encryptResponse(response, aesKey, iv));
+  const response = { version: '3.0', screen: result.screen, data: result.data };
+  sendFlowResponse(res, response, aesKey, iv);
 }
