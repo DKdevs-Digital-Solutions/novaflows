@@ -1,10 +1,6 @@
-import { config } from 'dotenv';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+// Em desenvolvimento use: node --env-file=server/.env server/index.js
+// No Docker as vars vêm direto do compose/Portainer — sem dotenv necessário.
 
-// Carrega server/.env independente de onde o processo foi iniciado
-const __dirname = dirname(fileURLToPath(import.meta.url));
-config({ path: join(__dirname, '.env') });
 import express from 'express';
 import cors from 'cors';
 import fetch from 'node-fetch';
@@ -16,7 +12,7 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-// ─── MapSis proxy (espelha o Cloudflare Worker em desenvolvimento) ─────────────
+// ─── MapSis proxy (espelha o Cloudflare Worker em desenvolvimento) ────────────
 
 const ALLOWLIST = new Set([
   'get_lojas', 'get_servicos', 'get_cliente', 'set_cliente',
@@ -66,12 +62,10 @@ app.get('/api/mapsis/:method', async (req, res) => {
 
 // ─── WhatsApp Flows ───────────────────────────────────────────────────────────
 
-// GET → usado pelo WhatsApp para verificar que o endpoint está ativo
 app.get('/whatsapp/flows', (_req, res) => {
   res.json({ status: 'active', timestamp: new Date().toISOString() });
 });
 
-// POST → recebe todas as interações do flow (INIT, data_exchange, ping)
 app.post('/whatsapp/flows', handleWhatsAppFlows);
 
 // ─────────────────────────────────────────────────────────────────────────────
