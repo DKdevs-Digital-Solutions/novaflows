@@ -197,6 +197,17 @@ function isoToBr(iso = '') {
   return `${d}/${m}/${y}`;
 }
 
+// Normaliza qualquer formato de data ("2026-06-10", "10/06/2026", "10/06/2026 09:00")
+// para "DD/MM/AAAA" — usado para ler a data que o MapSis realmente gravou.
+function dataParaBr(valor = '') {
+  const s = String(valor || '').trim();
+  const iso = s.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[3]}/${iso[2]}/${iso[1]}`;
+  const br = s.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+  if (br) return `${br[1]}/${br[2]}/${br[3]}`;
+  return s.substring(0, 10);
+}
+
 // ─── Screen handlers ──────────────────────────────────────────────────────────
 
 async function handleInit() {
@@ -385,11 +396,8 @@ async function handleServicosLoja(data) {
   const { cpf_cnpj, tipo_cliente, id_cliente_mapsis, id_veiculo_mapsis, id_servico_mapsis, loja_selecionada } = data;
   const [id_loja_mapsis, cod_loja] = (loja_selecionada || '').split('|');
 
-  let tecnicosResult = {};
-  try {
-    tecnicosResult = await callMapsis('get_boxes', { cod_loja, id_loja_mapsis });
-  } catch { /* sem técnicos */ }
-
+  // O técnico é escolhido junto com o horário na tela seguinte (disponibilidade
+  // real por box). Aqui o cliente só seleciona a DATA.
   return {
     screen: 'DATA_TECNICO',
     data: {
@@ -400,7 +408,6 @@ async function handleServicosLoja(data) {
       id_servico_mapsis,
       id_loja_mapsis,
       cod_loja,
-      tecnicos: normalizeTecnicos(tecnicosResult),
       msg_agenda: '',
     },
   };
@@ -409,55 +416,62 @@ async function handleServicosLoja(data) {
 async function handleDataTecnico(data) {
   const {
     cpf_cnpj, tipo_cliente, id_cliente_mapsis, id_veiculo_mapsis,
-    id_servico_mapsis, id_loja_mapsis, cod_loja,
-    data_agendamento, id_box_mapsis,
+    id_servico_mapsis, id_loja_mapsis, cod_loja, data_agendamento,
   } = data;
 
   const apiDate = isoToBr(data_agendamento);
+  const carry = {
+    cpf_cnpj, tipo_cliente: tipo_cliente || '', id_cliente_mapsis, id_veiculo_mapsis,
+    id_servico_mapsis, id_loja_mapsis, cod_loja,
+  };
 
-  // Consulta a grade de TODOS os boxes (sem fixar id_box_mapsis): o MapSis devolve
-  // cada horário livre marcado com seu box. Assim mostramos toda a disponibilidade
-  // da data e, ao agendar, escolhemos um box que realmente tenha o horário.
-  let horariosResult = {};
-  try {
-    horariosResult = await callMapsis('get_agenda_horario_disponivel', {
-      id_veiculo_mapsis,
-      id_loja_mapsis,
-      id_servico_mapsis,
-      data_agendamento: apiDate,
-      retorno_consultor: '0',
-    });
-  } catch { /* sem horários */ }
+  // Agenda real de TODOS os boxes na data + nomes dos técnicos (para rotular)
+  const [agendaResult, boxesResult] = await Promise.all([
+    callMapsis('get_agenda_horario_disponivel', {
+      id_veiculo_mapsis, id_loja_mapsis, id_servico_mapsis,
+      data_agendamento: apiDate, retorno_consultor: '0',
+    }).catch(() => ({})),
+    callMapsis('get_boxes', { cod_loja, id_loja_mapsis }).catch(() => ({})),
+  ]);
 
-  const horarios = normalizeHorarios(horariosResult);
+  // Mapa box → nome do técnico (exclui boxes sem nome / ENCAIXE / RECALL)
+  const nomePorBox = {};
+  const rawBoxes = boxesResult?.boxes || boxesResult?.Boxes || boxesResult?.consultores || [];
+  for (const b of (Array.isArray(rawBoxes) ? rawBoxes : [rawBoxes])) {
+    const nome = String(b?.nome_produtivo || b?.nome || '').trim();
+    if (b?.id_box_mapsis && nome && !/ENCAIXE|RECALL/i.test(nome)) {
+      nomePorBox[String(b.id_box_mapsis)] = nome;
+    }
+  }
 
-  if (!horarios.length) {
-    let tecnicosResult = {};
-    try { tecnicosResult = await callMapsis('get_boxes', { cod_loja, id_loja_mapsis }); } catch { /* ok */ }
+  // Opções reais "HH:00 · Técnico" — cada uma é um slot que existe naquele box.
+  // O id carrega "box|hora" para o agendamento gravar exatamente o escolhido.
+  const seen = new Set();
+  const opcoes = extrairSlots(agendaResult)
+    .filter(s => s.hora.endsWith(':00') && nomePorBox[s.box])
+    .filter(s => { const k = `${s.box}|${s.hora}`; if (seen.has(k)) return false; seen.add(k); return true; })
+    .sort((a, b) => a.hora.localeCompare(b.hora) || nomePorBox[a.box].localeCompare(nomePorBox[b.box]))
+    .slice(0, 50)
+    .map(s => ({ id: `${s.box}|${s.hora}`, title: `${s.hora} · ${nomePorBox[s.box]}` }));
+
+  if (!opcoes.length) {
     return {
       screen: 'DATA_TECNICO',
       data: {
-        cpf_cnpj, tipo_cliente: tipo_cliente || '', id_cliente_mapsis, id_veiculo_mapsis,
-        id_servico_mapsis, id_loja_mapsis, cod_loja,
-        tecnicos: normalizeTecnicos(tecnicosResult),
+        ...carry,
         msg_agenda: `Sem horários disponíveis em ${apiDate}. Escolha outra data.`,
-        error_messages: {
-          data_agendamento: 'Sem horários nesta data. Escolha outra.',
-        },
+        error_messages: { data_agendamento: 'Sem horários nesta data. Escolha outra.' },
       },
     };
   }
 
-  const dataBr = isoToBr(data_agendamento);
   return {
     screen: 'SELECAO_HORARIO',
     data: {
-      cpf_cnpj, tipo_cliente: tipo_cliente || '', id_cliente_mapsis, id_veiculo_mapsis,
-      id_servico_mapsis, id_loja_mapsis, cod_loja,
-      id_box_mapsis: id_box_mapsis || '0',
+      ...carry,
       data_agendamento,
-      titulo_horario: `Horários disponíveis para ${dataBr}:`,
-      horarios,
+      titulo_horario: `Disponibilidade para ${apiDate} (horário · técnico):`,
+      opcoes,
     },
   };
 }
@@ -466,8 +480,13 @@ async function handleSelecaoHorario(data) {
   const {
     cpf_cnpj, tipo_cliente, id_cliente_mapsis, id_veiculo_mapsis,
     id_servico_mapsis, id_loja_mapsis, cod_loja,
-    id_box_mapsis, data_agendamento, hora_agendamento, observacao,
+    slot_escolhido, data_agendamento, observacao,
   } = data;
+
+  // O slot escolhido carrega "box|hora" (técnico + horário reais selecionados)
+  const [boxSel, horaSel] = String(slot_escolhido || '').split('|');
+  const id_box_mapsis = boxSel || '0';
+  const hora_agendamento = horaSel || '';
 
   // Buscar contatos do cliente para exibir como dica na tela CONTATO.
   // Os hints são pré-formatados no servidor porque WhatsApp Flows só avalia
@@ -710,56 +729,42 @@ async function handleRevisao(data) {
     }
   };
 
-  // Re-consulta a agenda (todos os boxes) no momento da gravação para descobrir
-  // quais boxes têm o horário escolhido REALMENTE livre. Isso elimina o
-  // "agenda mostrou vaga mas o set_agendamento recusou": só agendamos num box
-  // que a própria agenda acabou de confirmar como disponível.
-  let agendaResult = {};
-  try {
-    agendaResult = await callMapsis('get_agenda_horario_disponivel', {
-      id_veiculo_mapsis, id_loja_mapsis, id_servico_mapsis,
-      data_agendamento: apiDate, retorno_consultor: '0',
-    });
-  } catch { /* sem agenda */ }
+  const dataPedida = isoToBr(data_agendamento);
+  const horaPedida = String(hora_agendamento || '').substring(0, 5);
 
-  // Boxes que têm o horário escolhido livre — com o box preferido na frente
-  const boxesComHora = [...new Set(
-    extrairSlots(agendaResult).filter(s => s.hora === hora_agendamento).map(s => s.box)
-  )];
-  const ordemBoxes = boxId && boxesComHora.includes(String(boxId))
-    ? [String(boxId), ...boxesComHora.filter(b => b !== String(boxId))]
-    : boxesComHora;
-
-  let erroSave = null;
-  if (ordemBoxes.length && ordemBoxes.some(Boolean)) {
-    // Tenta cada box (preferido primeiro) até um aceitar
-    erroSave = 'Horário indisponível.';
-    for (const bx of ordemBoxes.filter(Boolean)) {
-      const obs = (boxId && bx !== String(boxId))
-        ? [observacaoFinal, `Mecânico preferido: ${info.tecnicoNome}`].filter(Boolean).join(' | ')
-        : observacaoFinal;
-      erroSave = await tentarAgendar({ id_box: bx }, obs);
-      if (!erroSave) break;
-      console.warn(`[handleRevisao] box ${bx} recusou (${erroSave}). Tentando proximo box...`);
-    }
-  } else {
-    // Grade de consultor (sem box) ou agenda indisponível → deixa o MapSis alocar
-    erroSave = await tentarAgendar({}, observacaoFinal);
-  }
-
-  // O MapSis devolve HTTP 200 mesmo em falha — o erro vem em retorno.erro
-  // (igual getErroApi do PWA). Só mostramos erro se nem o fallback funcionou.
+  // Grava EXATAMENTE o box + dia + hora escolhidos. Como o slot veio da
+  // disponibilidade REAL daquele box, o MapSis honra sem remarcar.
+  const erroSave = await tentarAgendar(boxId ? { id_box: boxId } : {}, observacaoFinal);
   if (erroSave) {
-    console.warn('[handleRevisao] set_agendamento falhou definitivamente:', erroSave);
     return {
       screen: 'REVISAO',
       data: {
         ...resumos,
-        msg_erro: `Não foi possível agendar: ${erroSave}`,
+        msg_erro: `Não foi possível agendar: ${erroSave} Toque em Voltar e escolha outro horário.`,
         ...forwardAgendamento(data, info, condutor, nome_condutor),
       },
     };
   }
+
+  // Confirma com o que o MapSis REALMENTE gravou (get_agenda_veiculo) — garantia.
+  let dataReal = dataPedida, horaReal = horaPedida, mecanicoReal = info.tecnicoNome;
+  try {
+    const agV = await callMapsis('get_agenda_veiculo', { id_veiculo_mapsis });
+    const raw = agV?.agendamentos || agV?.Agendamentos || [];
+    const lista = (Array.isArray(raw) ? raw : [raw]).filter(Boolean);
+    const idDe = a => Number(a?.id_mapsis_agendamento ?? a?.id_agendamento_mapsis ?? 0);
+    const recente = lista.sort((a, b) => idDe(b) - idDe(a))[0]; // maior id = recém-criado
+    if (recente) {
+      dataReal = dataParaBr(recente.data) || dataReal;
+      horaReal = String(recente.horario || horaReal).substring(0, 5);
+      mecanicoReal = String(recente.consultor || '').trim() || mecanicoReal;
+      console.log(`[handleRevisao] marcado de fato: ${dataReal} ${horaReal} | box=${recente.box ?? '-'} | consultor=${mecanicoReal || '-'}`);
+    }
+  } catch (e) { console.warn('[handleRevisao] get_agenda_veiculo falhou:', e.message); }
+
+  const resumo_aviso = `${dataReal} ${horaReal}` !== `${dataPedida} ${horaPedida}`
+    ? `Atenção: o sistema ajustou para ${dataReal} às ${horaReal} (vaga mais próxima disponível).`
+    : '';
 
   return {
     screen: 'CONFIRMACAO',
@@ -767,12 +772,13 @@ async function handleRevisao(data) {
       tipo_cliente: data.tipo_cliente || '',
       resumo_loja: resumos.resumo_loja,
       resumo_servico: resumos.resumo_servico,
-      resumo_data: resumos.resumo_data,
-      resumo_tecnico: resumos.resumo_tecnico,
+      resumo_data: `Data e hora: ${dataReal} às ${horaReal}`,
+      resumo_tecnico: `Técnico/Mecânico: ${mecanicoReal || 'Definido pela oficina'}`,
       resumo_veiculo: resumos.resumo_veiculo,
       resumo_condutor: resumos.resumo_condutor,
       resumo_contato: resumos.resumo_contato,
       resumo_obs: resumos.resumo_obs,
+      resumo_aviso,
     },
   };
 }
